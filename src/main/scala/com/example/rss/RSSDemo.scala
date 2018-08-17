@@ -106,33 +106,37 @@ object RSSDemo {
                 case (rssEntry: RSSEntry, tags: List[String]) =>
                   NewsEntry(rssEntry.title, rssEntry.links.map(_.href).mkString(","), rssEntry.publishedDate, tags)
               }
-            val mongoInDriver = mongo.copy
-            import scala.concurrent.ExecutionContext.Implicits.global
-            val futureRemove: Future[WriteResult] = mongoInDriver.collection("news").flatMap(_.remove(BSONDocument()))
-            futureRemove onComplete {
-              case Success(writeResult) if writeResult.ok =>
-                resultRDD.foreachPartition { partition =>
-                  partition foreach { newsEntry =>
-                      val mongoInPartition = mongo.copy
-                      val newsCollectionFuture = mongoInPartition.collection("news")
-                      val futureInsert = newsCollectionFuture.flatMap(_.insert(newsEntry))
-                      futureInsert onComplete { result =>
-                        println(s"future insert done: $result")
-                      }
-                      transformToClose(futureInsert) { () =>
-                        mongoInPartition.futureConnection foreach { conn =>
-                          conn.askClose()(10.seconds)
-                        }
-                      }
-                  }
+            refreshNewsInDB(resultRDD)
+        }
+      }
+    }
+
+    def refreshNewsInDB(resultRDD: RDD[NewsEntry]): Unit = {
+      val mongoInDriver = mongo.copy
+      import scala.concurrent.ExecutionContext.Implicits.global
+      val futureRemove: Future[WriteResult] = mongoInDriver.collection("news").flatMap(_.remove(BSONDocument()))
+      transformToClose(futureRemove) { () =>
+        mongoInDriver.futureConnection foreach { conn =>
+          conn.askClose()(10.seconds)
+        }
+      }
+      futureRemove onComplete {
+        case Success(writeResult) if writeResult.ok =>
+          resultRDD.foreachPartition { partition =>
+            partition foreach { newsEntry =>
+              val mongoInPartition = mongo.copy
+              val newsCollectionFuture = mongoInPartition.collection("news")
+              val futureInsert = newsCollectionFuture.flatMap(_.insert(newsEntry))
+              futureInsert onComplete { result =>
+                println(s"future insert done: $result")
+              }
+              transformToClose(futureInsert) { () =>
+                mongoInPartition.futureConnection foreach { conn =>
+                  conn.askClose()(10.seconds)
                 }
-            }
-            transformToClose(futureRemove) { () =>
-              mongoInDriver.futureConnection foreach { conn =>
-                conn.askClose()(10.seconds)
               }
             }
-        }
+          }
       }
     }
 
